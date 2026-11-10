@@ -235,3 +235,8 @@ select.input { padding-right: 6px; }
 .nowrap { white-space: nowrap; }
 .f-field .req { color: var(--bad); }
 .input.invalid { border-color: var(--bad); background: var(--bad-bg); }
+.sim-totp { font-size: 12px; color: var(--muted); border: 1px dashed var(--line); border-radius: 6px; padding: 8px 12px; }
+.sim-totp summary { cursor: pointer; font-weight: 600; }
+.sim-totp > div { margin-top: 6px; }
+.sim-totp code { font-family: ui-monospace, Menlo, monospace; color: var(--ink); }
+.sim-totp-uri code { word-break: break-all; font-size: 11px; }

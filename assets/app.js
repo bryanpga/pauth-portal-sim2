@@ -6,7 +6,6 @@
   const app = document.getElementById('app');
   const toasts = document.getElementById('toasts');
   const IDLE_LIMIT_MS = 30 * 60 * 1000;
-  const MFA_TTL_MS = 5 * 60 * 1000;
 
   // ---------- storage (sessionStorage with in-memory fallback) ----------
   const mem = {};
@@ -34,11 +33,6 @@
   const icdNoDot = (c) => c.replace('.', '');
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const latency = (min = 250, max = 900) => sleep(min + Math.random() * (max - min));
-  const maskEmail = (u) => {
-    const [a, b] = String(u).split('@');
-    if (!b) return a.slice(0, 1) + '•••••';
-    return a.slice(0, 1) + '•'.repeat(Math.max(3, a.length - 1)) + '@' + b;
-  };
   const age = (dob) => Math.floor((Date.now() - dob) / (365.25 * 86400000));
 
   function toast(html, { kind = 'info', timeout = 5000, id } = {}) {
@@ -225,7 +219,6 @@
 
       const pauseMfa = document.getElementById('pause-mfa').checked;
       store.del('mfa');
-      document.getElementById('mfa-toast')?.remove();
       store.set('session', { user: username, created: Date.now(), lastActive: Date.now(), mfaVerified: pauseMfa });
       if (pauseMfa) { await startSession(); location.hash = '#/members'; return; }
       location.hash = '#/mfa';
@@ -237,61 +230,64 @@
     store.set('roster', GEN.roster());
   }
 
-  function issueCode(method) {
-    const code = String(Math.floor(Math.random() * 1e6)).padStart(6, '0');
-    const s = session();
-    const dest = method === 'sms' ? '(•••) •••-' + String(1000 + Math.floor(Math.random() * 9000)) : maskEmail(s.user);
-    store.set('mfa', { code, method, dest, expires: Date.now() + MFA_TTL_MS, attempts: 0 });
-    toast(`<div class="sim-msg-title">${method === 'sms' ? '📱 Simulated SMS' : '✉️ Simulated email'} · to ${esc(dest)}</div>
-      <div>Provider Portal verification code: <strong id="sim-mfa-code" data-testid="sim-mfa-code">${code}</strong></div>
-      <div class="sim-msg-sub">Expires in 5 minutes. Do not share this code.</div>`, { kind: 'sim', timeout: 0, id: 'mfa-toast' });
-    return store.get('mfa');
+  // ---------- TOTP (RFC 6238: HMAC-SHA1, 6 digits, 30 s step) ----------
+  // Hardcoded shared secret so automation can generate matching codes. Test-only.
+  const TOTP_SECRET = 'CCKCYAP5JSTNGXYMYYB2KRE3WHOYFO5J';
+  const TOTP_ISSUER = 'Provider Portal Sim';
+  const TOTP_STEP = 30;
+  const TOTP_DRIFT = 1; // accept codes from one step before/after for clock skew
+  function base32Decode(str) {
+    const alpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let bits = 0, val = 0; const out = [];
+    for (const c of str.replace(/=+$/, '').toUpperCase()) {
+      const i = alpha.indexOf(c); if (i < 0) continue;
+      val = (val << 5) | i; bits += 5;
+      if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; }
+    }
+    return new Uint8Array(out);
+  }
+  let totpKey;
+  async function totpAt(counter) {
+    totpKey ||= crypto.subtle.importKey('raw', base32Decode(TOTP_SECRET), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+    const msg = new ArrayBuffer(8); const dv = new DataView(msg);
+    dv.setUint32(0, Math.floor(counter / 2 ** 32)); dv.setUint32(4, counter >>> 0);
+    const h = new Uint8Array(await crypto.subtle.sign('HMAC', await totpKey, msg));
+    const o = h[h.length - 1] & 15;
+    const bin = ((h[o] & 127) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3];
+    return String(bin % 1e6).padStart(6, '0');
+  }
+  async function totpVerify(code) {
+    const now = Math.floor(Date.now() / 1000 / TOTP_STEP);
+    for (let d = -TOTP_DRIFT; d <= TOTP_DRIFT; d++) if (await totpAt(now + d) === code) return true;
+    return false;
   }
 
   function viewMfa() {
     const s = session();
     if (!s) { location.hash = '#/login'; return; }
     if (s.mfaVerified) { location.hash = '#/members'; return; }
-    const existing = store.get('mfa');
-    if (!existing) {
-      authLayout(`
-        <h2 class="card-title">Verify Your Identity</h2>
-        <p class="muted-text">Multi-factor authentication is required. Choose where to receive your one-time verification code.</p>
-        <div class="flash-slot"></div>
-        <form id="mfa-method" data-testid="mfa-method-form">
-          <label class="radio-card"><input type="radio" name="method" value="sms" checked data-testid="mfa-sms"><span><strong>Text message (SMS)</strong><small>Mobile number on file</small></span></label>
-          <label class="radio-card"><input type="radio" name="method" value="email" data-testid="mfa-email"><span><strong>Email</strong><small>${esc(maskEmail(s.user))}</small></span></label>
-          <button class="btn-login mt-lg" type="submit" data-testid="mfa-send"><span>SEND CODE</span>${ICON_ARROW}</button>
-          <div class="center mt-lg"><a href="#/login" class="link" id="mfa-cancel">Cancel and return to login</a></div>
-        </form>`);
-      document.getElementById('mfa-cancel').onclick = (e) => { e.preventDefault(); logout(); };
-      document.getElementById('mfa-method').onsubmit = async (e) => {
-        e.preventDefault();
-        const method = new FormData(e.target).get('method');
-        e.target.querySelector('button[type=submit]').disabled = true;
-        await latency(400, 900);
-        issueCode(method);
-        viewMfa();
-      };
-      return;
-    }
+    const uri = `otpauth://totp/${encodeURIComponent(TOTP_ISSUER + ':' + s.user)}?secret=${TOTP_SECRET}&issuer=${encodeURIComponent(TOTP_ISSUER)}&algorithm=SHA1&digits=6&period=${TOTP_STEP}`;
 
     authLayout(`
       <h2 class="card-title">Enter Verification Code</h2>
-      <p class="muted-text">We sent a 6-digit code to <strong>${esc(existing.dest)}</strong>. The code expires in <span id="mfa-timer" data-testid="mfa-timer">5:00</span>.</p>
+      <p class="muted-text">Open your authenticator app and enter the 6-digit code for <strong>${esc(TOTP_ISSUER)}</strong>. Codes refresh every 30 seconds.</p>
       <div class="flash-slot"></div>
       <form id="mfa-form" novalidate data-testid="mfa-form">
         <div class="otp" id="otp">
-          ${[0, 1, 2, 3, 4, 5].map((i) => `<input class="otp-box" inputmode="numeric" maxlength="1" aria-label="Digit ${i + 1}" data-testid="otp-${i}">`).join('')}
+          ${[0, 1, 2, 3, 4, 5].map((i) => `<input class="otp-box" inputmode="numeric" autocomplete="one-time-code" maxlength="1" aria-label="Digit ${i + 1}" data-testid="otp-${i}">`).join('')}
         </div>
         <input type="hidden" id="mfa-code" data-testid="mfa-code">
         <label class="check mt"><input type="checkbox" id="trust-device" data-testid="trust-device"> <span>Remember this device for 30 days</span></label>
         <button class="btn-login mt-lg" type="submit" id="mfa-submit" data-testid="mfa-submit"><span>VERIFY</span>${ICON_ARROW}</button>
         <div class="mfa-links">
-          <a href="#" class="link" id="mfa-resend" data-testid="mfa-resend">Resend code</a>
-          <a href="#" class="link" id="mfa-change" data-testid="mfa-change">Use a different method</a>
-          <a href="#" class="link" id="mfa-cancel">Cancel</a>
+          <a href="#" class="link" id="mfa-cancel" data-testid="mfa-cancel">Cancel and return to login</a>
         </div>
+        <details class="sim-totp mt-lg" data-testid="sim-totp">
+          <summary>Simulator: authenticator setup key</summary>
+          <div>Key (base32): <code id="sim-totp-secret" data-testid="sim-totp-secret">${TOTP_SECRET}</code></div>
+          <div>SHA-1 · 6 digits · 30 s period</div>
+          <div class="sim-totp-uri"><code data-testid="sim-totp-uri">${esc(uri)}</code></div>
+        </details>
       </form>`);
 
     const boxes = [...document.querySelectorAll('.otp-box')];
@@ -323,46 +319,27 @@
     boxes[0].setAttribute('maxlength', '6');
     boxes[0].focus();
 
-    const timerEl = document.getElementById('mfa-timer');
-    const tick = setInterval(() => {
-      const m = store.get('mfa');
-      if (!m || !document.body.contains(timerEl)) { clearInterval(tick); return; }
-      const left = Math.max(0, m.expires - Date.now());
-      timerEl.textContent = `${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`;
-      timerEl.classList.toggle('expired', left === 0);
-    }, 500);
-
     const slot = app.querySelector('.flash-slot');
-    document.getElementById('mfa-resend').onclick = async (e) => {
-      e.preventDefault();
-      await latency(300, 700);
-      const m = issueCode(existing.method);
-      slot.innerHTML = `<div class="alert alert-info" data-testid="mfa-resent">A new code was sent to ${esc(m.dest)}.</div>`;
-      boxes.forEach((b) => { b.value = ''; }); sync(); boxes[0].focus();
-    };
-    document.getElementById('mfa-change').onclick = (e) => { e.preventDefault(); store.del('mfa'); document.getElementById('mfa-toast')?.remove(); viewMfa(); };
-    document.getElementById('mfa-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('mfa-toast')?.remove(); logout(); };
+    document.getElementById('mfa-cancel').onclick = (e) => { e.preventDefault(); logout(); };
 
     document.getElementById('mfa-form').onsubmit = async (e) => {
       e.preventDefault();
       sync();
       const entered = hidden.value;
-      const m = store.get('mfa');
       if (!/^\d{6}$/.test(entered)) { slot.innerHTML = '<div class="alert alert-error" data-testid="mfa-error">Enter the 6-digit code.</div>'; return; }
+      if (!crypto?.subtle) { slot.innerHTML = '<div class="alert alert-error" data-testid="mfa-error">Code verification needs a secure context (https or localhost).</div>'; return; }
       const btn = document.getElementById('mfa-submit');
       btn.disabled = true; btn.classList.add('busy');
-      await latency(400, 1000);
+      const [ok] = await Promise.all([totpVerify(entered), latency(400, 1000)]);
       btn.disabled = false; btn.classList.remove('busy');
-      if (Date.now() > m.expires) { slot.innerHTML = '<div class="alert alert-error" data-testid="mfa-error">This code has expired. Select "Resend code" to get a new one.</div>'; return; }
-      if (entered !== m.code) {
+      if (!ok) {
+        const m = store.get('mfa') || { attempts: 0 };
         m.attempts += 1; store.set('mfa', m);
-        if (m.attempts >= 3) { document.getElementById('mfa-toast')?.remove(); logout('Too many incorrect verification attempts. Please log in again.'); return; }
+        if (m.attempts >= 3) { logout('Too many incorrect verification attempts. Please log in again.'); return; }
         slot.innerHTML = `<div class="alert alert-error" data-testid="mfa-error">Incorrect code. ${3 - m.attempts} attempt${3 - m.attempts === 1 ? '' : 's'} remaining.</div>`;
         boxes.forEach((b) => { b.value = ''; }); sync(); boxes[0].focus();
         return;
       }
-      clearInterval(tick);
-      document.getElementById('mfa-toast')?.remove();
       store.del('mfa');
       const s2 = session(); s2.mfaVerified = true; s2.lastActive = Date.now(); store.set('session', s2);
       await startSession();
