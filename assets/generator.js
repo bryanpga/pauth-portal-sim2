@@ -103,6 +103,15 @@ window.GEN = (() => {
     const count = rng.int(40, 140);
     const seen = new Set();
     const members = [];
+    const ymd = (a) => (a ? new Date(a[0], a[1] - 1, a[2]).getTime() : null);
+    R.fixedMembers.forEach((f, i) => {
+      const plan = R.plans.find((p) => p.name === f.plan);
+      seen.add(f.id);
+      members.push({
+        ...f, planPrefix: plan.prefix, dob: ymd(f.dob), effective: ymd(f.effective), term: ymd(f.term),
+        lastActivity: addDays(startOfToday(), -rng.int(0, 30)), idx: -1 - i
+      });
+    });
     for (let i = 0; i < count; i++) {
       const m = member(rng, i);
       if (seen.has(m.id)) continue;

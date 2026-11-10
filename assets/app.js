@@ -7,7 +7,6 @@
   const toasts = document.getElementById('toasts');
   const IDLE_LIMIT_MS = 30 * 60 * 1000;
   const MFA_TTL_MS = 5 * 60 * 1000;
-  const PAGE_SIZE = 25;
 
   // ---------- storage (sessionStorage with in-memory fallback) ----------
   const mem = {};
@@ -410,44 +409,61 @@
   }
 
   // ---------- members list ----------
+  // Search requires all four of member ID, first name, last name and DOB, and
+  // only returns members that match every field (case-insensitive).
+  const SEARCH_FIELDS = [['id', 'Insurance Member ID'], ['first', 'First Name'], ['last', 'Last Name'], ['dob', 'Date of Birth']];
+  // Accepts MM/DD/YYYY, M/D/YYYY, MM-DD-YYYY or YYYY-MM-DD; returns MM/DD/YYYY or ''.
+  function normDob(v) {
+    let m = v.trim().match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/), y, mo, d;
+    if (m) [, mo, d, y] = m; else if ((m = v.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) [, y, mo, d] = m; else return '';
+    const dt = new Date(+y, +mo - 1, +d);
+    return dt.getMonth() === +mo - 1 && dt.getDate() === +d ? mdy(dt.getTime()) : '';
+  }
+  const genderLabel = (g) => ({ F: 'Female', M: 'Male' })[g] || 'Unknown';
+
   async function viewMembers({ params, token }) {
     loading('Loading members…', [['Members']]);
     await latency(300, 900);
     if (stale(token)) return;
     const roster = store.get('roster');
-    const q = (params.get('q') || '').trim();
-    const plan = params.get('plan') || '';
-    const elig = params.get('elig') || '';
-    const page = Math.max(1, parseInt(params.get('page') || '1', 10));
-    const ql = q.toLowerCase();
-    const filtered = roster.members.filter((m) =>
-      (!ql || `${m.first} ${m.last} ${m.last}, ${m.first} ${m.id} ${mdy(m.dob)}`.toLowerCase().includes(ql)) &&
-      (!plan || m.plan === plan) && (!elig || m.eligibility === elig));
-    const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-    const cur = Math.min(page, pages);
-    const rows = filtered.slice((cur - 1) * PAGE_SIZE, cur * PAGE_SIZE);
-    const plans = [...new Set(roster.members.map((m) => m.plan))].sort();
-    const qs = (over) => { const p = new URLSearchParams({ q, plan, elig, page: cur, ...over }); [...p.keys()].forEach((k) => { if (!p.get(k) || (k === 'page' && p.get(k) === '1')) p.delete(k); }); const s = p.toString(); return '#/members' + (s ? '?' + s : ''); };
+    const v = Object.fromEntries(SEARCH_FIELDS.map(([k]) => [k, (params.get(k) || '').trim()]));
+    const searched = SEARCH_FIELDS.some(([k]) => v[k]);
+    const missing = SEARCH_FIELDS.filter(([k]) => !v[k]);
+    const dob = v.dob ? normDob(v.dob) : '';
+    const errors = [];
+    if (searched && missing.length) errors.push(`Required: ${missing.map(([, l]) => l).join(', ')}.`);
+    if (v.dob && !dob) errors.push('Date of Birth must be a valid date in MM/DD/YYYY format.');
+    const ran = searched && !errors.length;
+    const idQ = v.id.toUpperCase().replace(/[\s-]/g, '');
+    const results = ran ? roster.members.filter((m) =>
+      (idQ === m.id || idQ === m.id + m.suffix) &&
+      m.first.toLowerCase() === v.first.toLowerCase() &&
+      m.last.toLowerCase() === v.last.toLowerCase() &&
+      mdy(m.dob) === dob) : [];
+    const invalid = (k) => searched && (!v[k] || (k === 'dob' && !dob)) ? ' invalid' : '';
+    const field = (k, label, ph) => `<div class="f-field"><label for="f-${k}">${label} <span class="req">*</span></label><input class="input sm${invalid(k)}" id="f-${k}" name="${k}" value="${esc(v[k])}" placeholder="${ph}" required autocomplete="off" data-testid="search-${k}"></div>`;
 
     shell(`
       <div class="page-head">
         <div>
           <h1 class="page-title">Member Search</h1>
-          <p class="subtle">${roster.members.length} members attributed to your organization · data generated ${dateTime(roster.generatedAt)}</p>
+          <p class="subtle">Enter the member's insurance ID, first name, last name and date of birth. All fields are required.</p>
         </div>
       </div>
-      <form class="filters card" id="filters" data-testid="member-filters">
-        <div class="f-field grow"><label for="f-q">Name, Member ID or DOB</label><input class="input sm" id="f-q" value="${esc(q)}" placeholder="e.g. Smith, WPP123456789, 04/12/1968" data-testid="member-search"></div>
-        <div class="f-field"><label for="f-plan">Plan</label><select class="input sm" id="f-plan" data-testid="plan-filter"><option value="">All plans</option>${plans.map((p) => `<option ${p === plan ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></div>
-        <div class="f-field"><label for="f-elig">Eligibility</label><select class="input sm" id="f-elig" data-testid="elig-filter"><option value="">All</option>${['Active', 'Termed'].map((p) => `<option ${p === elig ? 'selected' : ''}>${p}</option>`).join('')}</select></div>
-        <div class="f-actions"><button class="btn" type="submit" data-testid="search-btn">Search</button><a class="btn ghost" href="#/members">Clear</a></div>
+      <form class="filters card" id="filters" novalidate data-testid="member-filters">
+        ${field('id', 'Insurance Member ID', 'e.g. WPP123456789')}
+        ${field('first', 'First Name', 'First name')}
+        ${field('last', 'Last Name', 'Last name')}
+        ${field('dob', 'Date of Birth', 'MM/DD/YYYY')}
+        <div class="f-actions"><button class="btn" type="submit" data-testid="search-btn">Search</button><a class="btn ghost" href="#/members" data-testid="search-clear">Clear</a></div>
       </form>
-      <div class="card flush">
+      ${errors.length ? `<div class="alert alert-error" data-testid="search-error">${errors.map(esc).join(' ')}</div>` : ''}
+      ${ran ? `<div class="card flush">
         <div class="table-scroll">
         <table class="grid" data-testid="member-table">
           <thead><tr><th>Member ID</th><th>Member Name</th><th>DOB</th><th>Gender</th><th>Plan</th><th>Group #</th><th>Eligibility</th><th>PCP</th><th></th></tr></thead>
           <tbody>
-            ${rows.length ? rows.map((m) => `
+            ${results.length ? results.map((m) => `
               <tr class="click-row" data-href="#/members/${m.id}" data-testid="member-row" data-member-id="${m.id}">
                 <td class="mono">${m.id}${m.suffix}</td>
                 <td><a href="#/members/${m.id}" class="strong-link">${esc(m.last)}, ${esc(m.first)}${m.middle ? ' ' + m.middle + '.' : ''}</a></td>
@@ -458,23 +474,17 @@
                 <td><span class="pill ${statusClass(m.eligibility)}">${m.eligibility}</span></td>
                 <td>${esc(m.pcp)}</td>
                 <td class="right nowrap"><a href="#/members/${m.id}" class="link">View ›</a></td>
-              </tr>`).join('') : '<tr><td colspan="9" class="empty">No members match your search.</td></tr>'}
+              </tr>`).join('') : '<tr><td colspan="9" class="empty" data-testid="no-match">No member found matching all of the information entered. Check the ID, name and date of birth and try again.</td></tr>'}
           </tbody>
         </table>
         </div>
-        <div class="pager" data-testid="pager">
-          <span>Showing ${filtered.length ? (cur - 1) * PAGE_SIZE + 1 : 0}–${Math.min(cur * PAGE_SIZE, filtered.length)} of ${filtered.length}</span>
-          <span class="pager-btns">
-            ${cur > 1 ? `<a class="btn ghost sm" href="${qs({ page: cur - 1 })}" data-testid="prev-page">‹ Prev</a>` : '<span class="btn ghost sm disabled">‹ Prev</span>'}
-            <span class="page-no">Page ${cur} of ${pages}</span>
-            ${cur < pages ? `<a class="btn ghost sm" href="${qs({ page: cur + 1 })}" data-testid="next-page">Next ›</a>` : '<span class="btn ghost sm disabled">Next ›</span>'}
-          </span>
-        </div>
-      </div>`, [['Members']]);
+      </div>` : ''}`, [['Members']]);
 
     document.getElementById('filters').onsubmit = (e) => {
       e.preventDefault();
-      location.hash = qs({ q: document.getElementById('f-q').value.trim(), plan: document.getElementById('f-plan').value, elig: document.getElementById('f-elig').value, page: 1 });
+      const p = new URLSearchParams();
+      SEARCH_FIELDS.forEach(([k]) => p.set(k, document.getElementById('f-' + k).value.trim()));
+      location.hash = '#/members?' + p.toString();
     };
     app.querySelectorAll('.click-row').forEach((r) => r.addEventListener('click', (e) => { if (!e.target.closest('a')) location.hash = r.dataset.href; }));
   }
@@ -506,12 +516,12 @@
           <div class="avatar">${esc(m.first[0])}${esc(m.last[0])}</div>
           <div>
             <h1 class="page-title">${esc(m.first)} ${m.middle ? m.middle + '. ' : ''}${esc(m.last)}</h1>
-            <div class="subtle">Member ID <span class="mono" data-testid="member-id">${m.id}${m.suffix}</span> · DOB ${mdy(m.dob)} (${age(m.dob)} yrs) · ${m.gender === 'F' ? 'Female' : 'Male'}</div>
+            <div class="subtle">Member ID <span class="mono" data-testid="member-id">${m.id}${m.suffix}</span> · DOB ${mdy(m.dob)} (${age(m.dob)} yrs) · ${genderLabel(m.gender)}</div>
           </div>
           <span class="pill lg ${statusClass(m.eligibility)}" data-testid="member-eligibility">${m.eligibility}</span>
         </div>
         <div class="kv-grid">
-          ${kv('Plan', m.plan)}${kv('Group #', m.group)}${kv('Employer / Sponsor', m.employer || '—')}${kv('Relationship', m.relationship)}
+          ${kv('Plan', m.plan)}${m.athenaId ? kv('Athena Patient ID', m.athenaId) : ''}${kv('Group #', m.group)}${kv('Employer / Sponsor', m.employer || '—')}${kv('Relationship', m.relationship)}
           ${kv('Effective Date', mdy(m.effective))}${kv('Term Date', m.term ? mdy(m.term) : '—')}${kv('Primary Care Provider', m.pcp)}${kv('Phone', m.phone)}
           ${kv('Address', `${m.address}, ${m.city}, ${m.state} ${m.zip}`, 'span2')}
         </div>

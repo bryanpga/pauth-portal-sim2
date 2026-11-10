@@ -233,3 +233,5 @@ select.input { padding-right: 6px; }
   .otp-box { width: 40px; height: 46px; }
 }
 .nowrap { white-space: nowrap; }
+.f-field .req { color: var(--bad); }
+.input.invalid { border-color: var(--bad); background: var(--bad-bg); }

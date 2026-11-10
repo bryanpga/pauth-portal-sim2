@@ -245,5 +245,18 @@ window.REF = (() => {
     'Out-of-network review — awaiting network adequacy determination'
   ];
 
-  return { firstNames, lastNames, places, streets, streetTypes, plans, employers, icd, categories, pcps, reviewers, posNames, denials, remarks, pendReasons };
+  // Members that appear in every generated roster with the same details.
+  // dob is [year, month (1-12), day]; plan must match a name in `plans`.
+  const fixedMembers = [
+    {
+      id: 'YPS113094227', suffix: '', athenaId: '1100493',
+      first: 'Itejere', last: 'Chesley', middle: '', gender: 'U', dob: [1975, 11, 21],
+      plan: 'Commercial PPO', group: 'GRP410387', employer: 'Brightwater Logistics',
+      eligibility: 'Active', effective: [2023, 1, 1], term: null,
+      pcp: 'Lakeside Family Medicine', relationship: 'Subscriber',
+      address: '2417 Maple Ave', city: 'Columbus', state: 'OH', zip: '43215', phone: '(614) 555-0148'
+    }
+  ];
+
+  return { firstNames, lastNames, places, streets, streetTypes, plans, employers, icd, categories, pcps, reviewers, posNames, denials, remarks, pendReasons, fixedMembers };
 })();
